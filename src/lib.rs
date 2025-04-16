@@ -459,6 +459,7 @@ impl BackgroundTask {
         receiver: mpsc::Receiver<Option<LokiEvent>>,
         labels: &FormattedLabels,
     ) -> Result<BackgroundTask, Error> {
+        println!("LOKI new background task");
         Ok(BackgroundTask {
             receiver: ReceiverStream::new(receiver),
             loki_url: loki_url
@@ -514,8 +515,14 @@ impl Future for BackgroundTask {
         while let Poll::Ready(maybe_maybe_item) = Pin::new(&mut self.receiver).poll_next(cx) {
             match maybe_maybe_item {
                 Some(Some(item)) => self.queues[item.level].push(item),
-                Some(None) => self.quitting = true, // Explicit close.
-                None => self.quitting = true,       // The sender was dropped.
+                Some(None) => {
+                    println!("LOKI explicit close");
+                    self.quitting = true
+                } // Explicit close.
+                None => {
+                    println!("LOKI sender dropped");
+                    self.quitting = true
+                } // The sender was dropped.
             }
         }
 
@@ -526,12 +533,15 @@ impl Future for BackgroundTask {
         };
         if !backing_off {
             self.backoff = None;
+        } else {
+            println!("LOKI backing off");
         }
         loop {
             if let Some(send_task) = &mut self.send_task {
                 match Pin::new(send_task).poll(cx) {
                     Poll::Ready(res) => {
                         if let Err(e) = &res {
+                            println!("LOKI poll error: {}", e);
                             let (drop_outstanding, backoff_time) = self.backoff_time();
                             drop(default_guard);
                             tracing::error!(
@@ -545,6 +555,7 @@ impl Future for BackgroundTask {
                             if drop_outstanding {
                                 let num_dropped: usize =
                                     self.queues.values_mut().map(|q| q.drop_outstanding()).sum();
+                                println!("LOKI dropping {} messages", num_dropped);
                                 drop(default_guard);
                                 tracing::error!(
                                     num_dropped,
@@ -583,6 +594,7 @@ impl Future for BackgroundTask {
                     .encode(&loki::PushRequest { streams })
                     .to_owned();
                 let request_builder = self.http_client.post(self.loki_url.clone());
+                println!("LOKI sending one request");
                 self.send_task = Some(Box::pin(
                     async move {
                         request_builder
@@ -600,6 +612,7 @@ impl Future for BackgroundTask {
             }
         }
         if self.quitting && self.send_task.is_none() {
+            println!("LOKI END {} {}", self.quitting, self.send_task.is_none());
             Poll::Ready(())
         } else {
             Poll::Pending
